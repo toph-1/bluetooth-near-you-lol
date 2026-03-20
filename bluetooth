@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# Working Bluetooth Scanner
+# Bluetooth Scanner - Self-Installing Version
+# This script will install all dependencies and scan for Bluetooth devices
+
+set -e
 
 # Colors
 RED='\033[0;31m'
@@ -9,246 +12,252 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Check if bluetoothctl exists
-if ! command -v bluetoothctl &> /dev/null; then
-    echo -e "${RED}Error: bluetoothctl not found${NC}"
-    echo "Install with: sudo apt install bluez-utils"
-    exit 1
-fi
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}     Bluetooth Device Scanner${NC}"
+echo -e "${BLUE}========================================${NC}\n"
 
-# Function to scan for devices
-scan_for_devices() {
-    local duration=$1
-    local temp_file=$(mktemp)
-    
-    echo -e "${GREEN}Starting Bluetooth scan for ${duration} seconds...${NC}"
-    echo -e "${YELLOW}Make sure Bluetooth is on and devices are discoverable${NC}\n"
-    
-    # Start bluetoothctl in a new session and capture output
-    timeout $duration bluetoothctl scan on 2>&1 | tee "$temp_file" &
-    local pid=$!
-    
-    # Show progress
-    for i in $(seq 1 $duration); do
-        echo -ne "\r${YELLOW}Scanning... ${i}/${duration} seconds${NC}"
-        sleep 1
-    done
-    echo -e "\n"
-    
-    # Kill the scan process
-    kill $pid 2>/dev/null
-    sleep 1
-    
-    # Stop scan properly
-    echo -e "scan off\nquit" | bluetoothctl > /dev/null 2>&1
-    
-    # Parse the output for devices
-    echo -e "${BLUE}=== Discovered Devices ===${NC}\n"
-    
-    # Extract devices from the scan output
-    grep -E "Device|NEW" "$temp_file" | grep -v "RSSI" | while read line; do
-        if [[ $line =~ Device[[:space:]]+([[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2})[[:space:]]+(.*) ]]; then
-            mac="${BASH_REMATCH[1]}"
-            name="${BASH_REMATCH[2]}"
-            
-            # Clean up the name
-            name=$(echo "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            
-            if [ -z "$name" ] || [ "$name" = "Device" ]; then
-                name="Unknown Device"
-            fi
-            
-            echo -e "${GREEN}Found:${NC} $name"
-            echo -e "  ${YELLOW}MAC:${NC} $mac"
-            echo ""
+# Function to detect OS
+detect_os() {
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if command -v apt &> /dev/null; then
+            echo "ubuntu"
+        elif command -v dnf &> /dev/null; then
+            echo "fedora"
+        elif command -v pacman &> /dev/null; then
+            echo "arch"
+        else
+            echo "unknown"
         fi
-    done
-    
-    # Also get devices from bluetoothctl devices list
-    echo -e "${BLUE}=== Known Devices ===${NC}\n"
-    bluetoothctl devices | while read line; do
-        mac=$(echo "$line" | awk '{print $2}')
-        name=$(echo "$line" | cut -d' ' -f3-)
-        
-        if [ -z "$name" ]; then
-            name="Unknown Device"
-        fi
-        
-        # Get more info
-        info=$(bluetoothctl info "$mac" 2>/dev/null)
-        
-        echo -e "${GREEN}Device:${NC} $name"
-        echo -e "  ${YELLOW}MAC:${NC} $mac"
-        
-        if echo "$info" | grep -q "Paired: yes"; then
-            echo -e "  ${YELLOW}Status:${NC} ${GREEN}Paired${NC}"
-        fi
-        
-        if echo "$info" | grep -q "Connected: yes"; then
-            echo -e "  ${YELLOW}Status:${NC} ${GREEN}Connected${NC}"
-        fi
-        
-        # Show device class if available
-        if echo "$info" | grep -q "Class:"; then
-            device_class=$(echo "$info" | grep "Class:" | cut -d: -f2- | sed 's/^[ \t]*//')
-            echo -e "  ${YELLOW}Type:${NC} $device_class"
-        fi
-        
-        echo ""
-    done
-    
-    rm "$temp_file"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "macos"
+    else
+        echo "unknown"
+    fi
 }
 
-# Function to get device details
-get_device_details() {
-    local mac="$1"
+# Function to install dependencies
+install_dependencies() {
+    OS=$(detect_os)
     
-    echo -e "${BLUE}=== Device Details for $mac ===${NC}\n"
+    echo -e "${YELLOW}Checking dependencies...${NC}"
     
-    info=$(bluetoothctl info "$mac" 2>/dev/null)
-    
-    if [ -z "$info" ]; then
-        echo -e "${RED}Device not found${NC}"
-        return
+    # Check if running as root for Linux
+    if [[ "$OS" != "macos" ]] && [ "$EUID" -ne 0 ]; then 
+        echo -e "${YELLOW}Installing dependencies requires sudo. Please enter your password if prompted.${NC}\n"
     fi
     
-    # Display all info
-    echo "$info" | while read line; do
-        if [[ $line =~ ^[[:space:]]*([^:]+):[[:space:]]*(.*)$ ]]; then
-            key="${BASH_REMATCH[1]}"
-            value="${BASH_REMATCH[2]}"
-            
-            case "$key" in
-                "Name")
-                    echo -e "${GREEN}Name:${NC} $value"
-                    ;;
-                "Alias")
-                    echo -e "${GREEN}Alias:${NC} $value"
-                    ;;
-                "Paired"|"Connected"|"Trusted"|"Blocked")
-                    if [[ "$value" == "yes" ]]; then
-                        echo -e "${GREEN}$key:${NC} ✓ $value"
-                    else
-                        echo -e "${YELLOW}$key:${NC} $value"
-                    fi
-                    ;;
-                "UUID")
-                    echo -e "${BLUE}Service:${NC} $value"
-                    ;;
-                *)
-                    echo -e "${YELLOW}$key:${NC} $value"
-                    ;;
-            esac
-        fi
-    done
+    case $OS in
+        ubuntu)
+            echo -e "${GREEN}Detected Ubuntu/Debian system${NC}"
+            sudo apt update
+            sudo apt install -y bluez bluez-tools bluez-hcidump rfkill
+            ;;
+        fedora)
+            echo -e "${GREEN}Detected Fedora system${NC}"
+            sudo dnf install -y bluez bluez-tools bluez-hcidump
+            ;;
+        arch)
+            echo -e "${GREEN}Detected Arch Linux${NC}"
+            sudo pacman -S --noconfirm bluez bluez-utils bluez-hcidump
+            ;;
+        macos)
+            echo -e "${GREEN}Detected macOS${NC}"
+            if ! command -v brew &> /dev/null; then
+                echo -e "${YELLOW}Installing Homebrew...${NC}"
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
+            brew install blueutil
+            ;;
+        *)
+            echo -e "${RED}Unknown operating system. Please install bluez manually.${NC}"
+            exit 1
+            ;;
+    esac
+    
+    # Start Bluetooth service on Linux
+    if [[ "$OS" != "macos" ]]; then
+        echo -e "${GREEN}Starting Bluetooth service...${NC}"
+        sudo systemctl enable bluetooth 2>/dev/null || true
+        sudo systemctl start bluetooth 2>/dev/null || true
+        sudo rfkill unblock bluetooth 2>/dev/null || true
+    fi
+    
+    echo -e "${GREEN}✓ Dependencies installed${NC}\n"
 }
 
-# Interactive mode
-interactive_mode() {
-    while true; do
-        echo ""
-        echo -e "${BLUE}=== Bluetooth Scanner ===${NC}"
-        echo "1) Quick scan (10 seconds)"
-        echo "2) Medium scan (30 seconds)"
-        echo "3) Long scan (60 seconds)"
-        echo "4) Show paired devices"
-        echo "5) Get device details by MAC"
-        echo "6) Turn Bluetooth ON"
-        echo "7) Turn Bluetooth OFF"
-        echo "8) Exit"
-        echo -n "Choose [1-8]: "
-        read choice
-        
-        case $choice in
-            1) scan_for_devices 10 ;;
-            2) scan_for_devices 30 ;;
-            3) scan_for_devices 60 ;;
-            4) 
-                echo -e "\n${BLUE}=== Paired Devices ===${NC}\n"
-                bluetoothctl devices | while read line; do
-                    mac=$(echo "$line" | awk '{print $2}')
-                    name=$(echo "$line" | cut -d' ' -f3-)
-                    if bluetoothctl info "$mac" | grep -q "Paired: yes"; then
-                        echo -e "${GREEN}✓${NC} $name ($mac)"
-                    fi
-                done
-                ;;
-            5)
-                echo -n "Enter MAC address (e.g., AA:BB:CC:DD:EE:FF): "
-                read mac
-                get_device_details "$mac"
-                ;;
-            6)
-                echo -e "${GREEN}Turning Bluetooth ON...${NC}"
-                echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1
-                sleep 1
-                if bluetoothctl show | grep -q "Powered: yes"; then
-                    echo -e "${GREEN}Bluetooth is now ON${NC}"
-                else
-                    echo -e "${RED}Failed to turn ON Bluetooth${NC}"
-                fi
-                ;;
-            7)
-                echo -e "${YELLOW}Turning Bluetooth OFF...${NC}"
-                echo -e "power off\nquit" | bluetoothctl > /dev/null 2>&1
-                echo -e "${YELLOW}Bluetooth is now OFF${NC}"
-                ;;
-            8)
-                echo -e "${GREEN}Goodbye!${NC}"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}Invalid option${NC}"
-                ;;
-        esac
-    done
-}
+# Check if we need to install dependencies
+echo -e "${YELLOW}Checking if dependencies are installed...${NC}"
 
-# Simple scan function
-simple_scan() {
-    local duration=${1:-10}
+NEED_INSTALL=false
+OS=$(detect_os)
+
+if [[ "$OS" != "macos" ]]; then
+    if ! command -v bluetoothctl &> /dev/null; then
+        NEED_INSTALL=true
+        echo -e "${YELLOW}bluetoothctl not found${NC}"
+    fi
+    if ! command -v hcitool &> /dev/null; then
+        NEED_INSTALL=true
+        echo -e "${YELLOW}hcitool not found${NC}"
+    fi
+else
+    if ! command -v blueutil &> /dev/null; then
+        NEED_INSTALL=true
+        echo -e "${YELLOW}blueutil not found${NC}"
+    fi
+fi
+
+if [ "$NEED_INSTALL" = true ]; then
+    echo -e "${YELLOW}Installing required packages...${NC}"
+    install_dependencies
+else
+    echo -e "${GREEN}✓ All dependencies are installed${NC}\n"
+fi
+
+# Function to scan on Linux
+scan_linux() {
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}     Starting Bluetooth Scan${NC}"
+    echo -e "${BLUE}========================================${NC}\n"
+    
+    # Make sure Bluetooth is on
+    echo -e "${YELLOW}Ensuring Bluetooth is enabled...${NC}"
+    bluetoothctl power on 2>/dev/null || true
+    sleep 2
     
     # Check if Bluetooth is on
     if ! bluetoothctl show | grep -q "Powered: yes"; then
-        echo -e "${YELLOW}Bluetooth is off. Turning it on...${NC}"
-        echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1
+        echo -e "${RED}Failed to enable Bluetooth. Please check your hardware.${NC}"
+        echo -e "${YELLOW}Try: sudo rfkill unblock bluetooth${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Bluetooth is ON${NC}\n"
+    
+    # Create temp file for results
+    TEMP_FILE=$(mktemp)
+    
+    echo -e "${YELLOW}Scanning for 15 seconds...${NC}"
+    echo -e "${YELLOW}Make sure your devices are in pairing/discovery mode${NC}\n"
+    
+    # Method 1: Using hcitool (most reliable)
+    echo -e "${GREEN}Method 1: Standard scan...${NC}"
+    echo "----------------------------------------"
+    sudo timeout 10 hcitool scan 2>/dev/null | tail -n +2 | while read line; do
+        if [[ $line =~ ([0-9A-F:]{17})[[:space:]]+(.*) ]]; then
+            mac="${BASH_REMATCH[1]}"
+            name="${BASH_REMATCH[2]}"
+            echo -e "${GREEN}✓ Found:${NC} $name ${YELLOW}($mac)${NC}"
+            echo "$mac|$name" >> "$TEMP_FILE"
+        fi
+    done
+    
+    # Method 2: Using bluetoothctl
+    echo -e "\n${GREEN}Method 2: Extended scan...${NC}"
+    echo "----------------------------------------"
+    
+    # Start scan in background
+    bluetoothctl scan on > /tmp/bt_scan.log 2>&1 &
+    SCAN_PID=$!
+    
+    # Wait for 10 seconds
+    for i in {1..10}; do
+        echo -ne "  Scanning... $i/10 seconds\r"
+        sleep 1
+    done
+    echo ""
+    
+    # Stop scan
+    echo "scan off" | bluetoothctl > /dev/null 2>&1
+    kill $SCAN_PID 2>/dev/null
+    
+    # Parse results
+    cat /tmp/bt_scan.log 2>/dev/null | grep "Device" | while read line; do
+        if [[ $line =~ Device[[:space:]]+([0-9A-F:]{17})[[:space:]]+(.*) ]]; then
+            mac="${BASH_REMATCH[1]}"
+            name="${BASH_REMATCH[2]}"
+            # Remove RSSI and other noise
+            name=$(echo "$name" | sed 's/ RSSI.*//' | sed 's/ Tx.*//')
+            if [ -n "$name" ] && [ "$name" != "Device" ]; then
+                echo -e "${GREEN}✓ Found:${NC} $name ${YELLOW}($mac)${NC}"
+                echo "$mac|$name" >> "$TEMP_FILE"
+            fi
+        fi
+    done
+    
+    # Remove duplicates and show all found devices
+    echo -e "\n${BLUE}========================================${NC}"
+    echo -e "${BLUE}     Scan Results${NC}"
+    echo -e "${BLUE}========================================${NC}\n"
+    
+    if [ -s "$TEMP_FILE" ]; then
+        sort -u "$TEMP_FILE" | while IFS='|' read mac name; do
+            echo -e "${GREEN}Device:${NC} $name"
+            echo -e "  ${YELLOW}MAC Address:${NC} $mac"
+            
+            # Get more info if available
+            info=$(bluetoothctl info "$mac" 2>/dev/null)
+            if echo "$info" | grep -q "Paired: yes"; then
+                echo -e "  ${YELLOW}Status:${NC} Paired"
+            fi
+            echo ""
+        done
+    else
+        echo -e "${RED}No devices found.${NC}"
+        echo -e "${YELLOW}Troubleshooting tips:${NC}"
+        echo "  1. Make sure your device is in pairing mode"
+        echo "  2. Move closer to the device"
+        echo "  3. Try: sudo hcitool scan (manual test)"
+        echo "  4. Check if Bluetooth hardware is working: lsusb | grep Bluetooth"
+    fi
+    
+    # Show paired devices
+    echo -e "${BLUE}Paired Devices:${NC}"
+    echo "----------------------------------------"
+    bluetoothctl devices | while read line; do
+        mac=$(echo "$line" | awk '{print $2}')
+        name=$(echo "$line" | cut -d' ' -f3-)
+        if [ -n "$name" ]; then
+            echo "  $name ($mac)"
+        fi
+    done
+    
+    rm -f "$TEMP_FILE" /tmp/bt_scan.log
+}
+
+# Function to scan on macOS
+scan_macos() {
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}     Starting Bluetooth Scan${NC}"
+    echo -e "${BLUE}========================================${NC}\n"
+    
+    echo -e "${YELLOW}Checking Bluetooth status...${NC}"
+    blueutil -p 2>/dev/null || true
+    
+    if ! blueutil -p | grep -q "1"; then
+        echo -e "${YELLOW}Turning Bluetooth on...${NC}"
+        blueutil -p 1
         sleep 2
     fi
     
-    scan_for_devices "$duration"
+    echo -e "${GREEN}✓ Bluetooth is ON${NC}\n"
+    echo -e "${YELLOW}Scanning for devices for 15 seconds...${NC}\n"
+    
+    # Use system_profiler for device info
+    echo -e "${GREEN}Discovered devices:${NC}"
+    echo "----------------------------------------"
+    
+    # Get Bluetooth devices
+    system_profiler SPBluetoothDataType 2>/dev/null | grep -A 10 "Devices (Paired, Configured, etc.)" | grep -E "Name:|Address:" | while read line; do
+        echo "$line"
+    done
 }
 
-# Main
-case "$1" in
-    -s|--scan)
-        simple_scan "$2"
-        ;;
-    -i|--interactive)
-        interactive_mode
-        ;;
-    -p|--paired)
-        echo -e "\n${BLUE}Paired Devices:${NC}\n"
-        bluetoothctl devices | while read line; do
-            mac=$(echo "$line" | awk '{print $2}')
-            name=$(echo "$line" | cut -d' ' -f3-)
-            if bluetoothctl info "$mac" 2>/dev/null | grep -q "Paired: yes"; then
-                echo "$name ($mac)"
-            fi
-        done
-        ;;
-    -h|--help)
-        echo "Usage: $0 [OPTIONS]"
-        echo "  -s, --scan [SECONDS]    Scan for devices"
-        echo "  -i, --interactive       Run interactive mode"
-        echo "  -p, --paired           Show paired devices"
-        echo "  -h, --help             Show this help"
-        echo ""
-        echo "Examples:"
-        echo "  $0 --scan 15           Scan for 15 seconds"
-        echo "  $0 --interactive       Start interactive menu"
-        ;;
-    *)
-        simple_scan 10
-        ;;
-esac
+# Run the scanner
+if [[ "$OS" == "macos" ]]; then
+    scan_macos
+else
+    scan_linux
+fi
+
+echo -e "\n${BLUE}========================================${NC}"
+echo -e "${GREEN}Scan complete!${NC}"
