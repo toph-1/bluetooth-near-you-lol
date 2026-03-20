@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Advanced Bluetooth Scanner with JSON output
+
+# Check dependencies
+if ! command -v bluetoothctl &> /dev/null; then
+    echo '{"error": "bluetoothctl not found"}'
+    exit 1
+fi
+
+# Function to get device info as JSON
+get_device_json() {
+    local mac="$1"
+    local name="$2"
+    local info=$(bluetoothctl info "$mac" 2>/dev/null)
+    
+    # Parse info
+    local alias=$(echo "$info" | grep "Alias:" | cut -d: -f2- | sed 's/^[ \t]*//')
+    local paired=$(echo "$info" | grep "Paired:" | cut -d: -f2- | sed 's/^[ \t]*//')
+    local connected=$(echo "$info" | grep "Connected:" | cut -d: -f2- | sed 's/^[ \t]*//')
+    local trusted=$(echo "$info" | grep "Trusted:" | cut -d: -f2- | sed 's/^[ \t]*//')
+    local blocked=$(echo "$info" | grep "Blocked:" | cut -d: -f2- | sed 's/^[ \t]*//')
+    
+    # Get UUIDs
+    local uuids=$(echo "$info" | grep "UUID:" | sed 's/^[ \t]*UUID: //' | sed 's/ .*//' | jq -R -s -c 'split("\n")[:-1]')
+    
+    # Create JSON object
+    cat <<EOF
+{
+    "mac": "$mac",
+    "name": "$name",
+    "alias": "$alias",
+    "paired": $paired,
+    "connected": $connected,
+    "trusted": $trusted,
+    "blocked": $blocked,
+    "uuids": $uuids
+}
+EOF
+}
+
+# Scan function returning JSON
+scan_json() {
+    local duration=${1:-10}
+    
+    # Start scan
+    bluetoothctl scan on > /dev/null 2>&1 &
+    local scan_pid=$!
+    
+    sleep "$duration"
+    
+    # Stop scan
+    bluetoothctl scan off > /dev/null 2>&1
+    kill $scan_pid 2>/dev/null
+    
+    # Collect devices
+    local devices_json=""
+    local first=true
+    
+    echo '{"devices": ['
+    
+    bluetoothctl devices | while read -r line; do
+        mac=$(echo "$line" | awk '{print $2}')
+        name=$(echo "$line" | cut -d' ' -f3-)
+        if [ -z "$name" ]; then
+            name="Unknown Device"
+        fi
+        
+        if [ "$first" = true ]; then
+            first=false
+        else
+            echo ","
+        fi
+        
+        get_device_json "$mac" "$name"
+    done
+    
+    echo ']}'
+}
+
+# Main
+case "$1" in
+    --json)
+        duration=${2:-10}
+        scan_json "$duration"
+        ;;
+    *)
+        # Use the basic version for normal output
+        exec bash -c "$(cat <<'EOF'
+# ... include the basic script here ...
+EOF
+)"
+        ;;
+esac
