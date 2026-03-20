@@ -1,94 +1,254 @@
 #!/bin/bash
 
-# Advanced Bluetooth Scanner with JSON output
+# Working Bluetooth Scanner
 
-# Check dependencies
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Check if bluetoothctl exists
 if ! command -v bluetoothctl &> /dev/null; then
-    echo '{"error": "bluetoothctl not found"}'
+    echo -e "${RED}Error: bluetoothctl not found${NC}"
+    echo "Install with: sudo apt install bluez-utils"
     exit 1
 fi
 
-# Function to get device info as JSON
-get_device_json() {
-    local mac="$1"
-    local name="$2"
-    local info=$(bluetoothctl info "$mac" 2>/dev/null)
+# Function to scan for devices
+scan_for_devices() {
+    local duration=$1
+    local temp_file=$(mktemp)
     
-    # Parse info
-    local alias=$(echo "$info" | grep "Alias:" | cut -d: -f2- | sed 's/^[ \t]*//')
-    local paired=$(echo "$info" | grep "Paired:" | cut -d: -f2- | sed 's/^[ \t]*//')
-    local connected=$(echo "$info" | grep "Connected:" | cut -d: -f2- | sed 's/^[ \t]*//')
-    local trusted=$(echo "$info" | grep "Trusted:" | cut -d: -f2- | sed 's/^[ \t]*//')
-    local blocked=$(echo "$info" | grep "Blocked:" | cut -d: -f2- | sed 's/^[ \t]*//')
+    echo -e "${GREEN}Starting Bluetooth scan for ${duration} seconds...${NC}"
+    echo -e "${YELLOW}Make sure Bluetooth is on and devices are discoverable${NC}\n"
     
-    # Get UUIDs
-    local uuids=$(echo "$info" | grep "UUID:" | sed 's/^[ \t]*UUID: //' | sed 's/ .*//' | jq -R -s -c 'split("\n")[:-1]')
+    # Start bluetoothctl in a new session and capture output
+    timeout $duration bluetoothctl scan on 2>&1 | tee "$temp_file" &
+    local pid=$!
     
-    # Create JSON object
-    cat <<EOF
-{
-    "mac": "$mac",
-    "name": "$name",
-    "alias": "$alias",
-    "paired": $paired,
-    "connected": $connected,
-    "trusted": $trusted,
-    "blocked": $blocked,
-    "uuids": $uuids
-}
-EOF
-}
-
-# Scan function returning JSON
-scan_json() {
-    local duration=${1:-10}
+    # Show progress
+    for i in $(seq 1 $duration); do
+        echo -ne "\r${YELLOW}Scanning... ${i}/${duration} seconds${NC}"
+        sleep 1
+    done
+    echo -e "\n"
     
-    # Start scan
-    bluetoothctl scan on > /dev/null 2>&1 &
-    local scan_pid=$!
+    # Kill the scan process
+    kill $pid 2>/dev/null
+    sleep 1
     
-    sleep "$duration"
+    # Stop scan properly
+    echo -e "scan off\nquit" | bluetoothctl > /dev/null 2>&1
     
-    # Stop scan
-    bluetoothctl scan off > /dev/null 2>&1
-    kill $scan_pid 2>/dev/null
+    # Parse the output for devices
+    echo -e "${BLUE}=== Discovered Devices ===${NC}\n"
     
-    # Collect devices
-    local devices_json=""
-    local first=true
+    # Extract devices from the scan output
+    grep -E "Device|NEW" "$temp_file" | grep -v "RSSI" | while read line; do
+        if [[ $line =~ Device[[:space:]]+([[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2}:[[:xdigit:]]{2})[[:space:]]+(.*) ]]; then
+            mac="${BASH_REMATCH[1]}"
+            name="${BASH_REMATCH[2]}"
+            
+            # Clean up the name
+            name=$(echo "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            
+            if [ -z "$name" ] || [ "$name" = "Device" ]; then
+                name="Unknown Device"
+            fi
+            
+            echo -e "${GREEN}Found:${NC} $name"
+            echo -e "  ${YELLOW}MAC:${NC} $mac"
+            echo ""
+        fi
+    done
     
-    echo '{"devices": ['
-    
-    bluetoothctl devices | while read -r line; do
+    # Also get devices from bluetoothctl devices list
+    echo -e "${BLUE}=== Known Devices ===${NC}\n"
+    bluetoothctl devices | while read line; do
         mac=$(echo "$line" | awk '{print $2}')
         name=$(echo "$line" | cut -d' ' -f3-)
+        
         if [ -z "$name" ]; then
             name="Unknown Device"
         fi
         
-        if [ "$first" = true ]; then
-            first=false
-        else
-            echo ","
+        # Get more info
+        info=$(bluetoothctl info "$mac" 2>/dev/null)
+        
+        echo -e "${GREEN}Device:${NC} $name"
+        echo -e "  ${YELLOW}MAC:${NC} $mac"
+        
+        if echo "$info" | grep -q "Paired: yes"; then
+            echo -e "  ${YELLOW}Status:${NC} ${GREEN}Paired${NC}"
         fi
         
-        get_device_json "$mac" "$name"
+        if echo "$info" | grep -q "Connected: yes"; then
+            echo -e "  ${YELLOW}Status:${NC} ${GREEN}Connected${NC}"
+        fi
+        
+        # Show device class if available
+        if echo "$info" | grep -q "Class:"; then
+            device_class=$(echo "$info" | grep "Class:" | cut -d: -f2- | sed 's/^[ \t]*//')
+            echo -e "  ${YELLOW}Type:${NC} $device_class"
+        fi
+        
+        echo ""
     done
     
-    echo ']}'
+    rm "$temp_file"
+}
+
+# Function to get device details
+get_device_details() {
+    local mac="$1"
+    
+    echo -e "${BLUE}=== Device Details for $mac ===${NC}\n"
+    
+    info=$(bluetoothctl info "$mac" 2>/dev/null)
+    
+    if [ -z "$info" ]; then
+        echo -e "${RED}Device not found${NC}"
+        return
+    fi
+    
+    # Display all info
+    echo "$info" | while read line; do
+        if [[ $line =~ ^[[:space:]]*([^:]+):[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            
+            case "$key" in
+                "Name")
+                    echo -e "${GREEN}Name:${NC} $value"
+                    ;;
+                "Alias")
+                    echo -e "${GREEN}Alias:${NC} $value"
+                    ;;
+                "Paired"|"Connected"|"Trusted"|"Blocked")
+                    if [[ "$value" == "yes" ]]; then
+                        echo -e "${GREEN}$key:${NC} ✓ $value"
+                    else
+                        echo -e "${YELLOW}$key:${NC} $value"
+                    fi
+                    ;;
+                "UUID")
+                    echo -e "${BLUE}Service:${NC} $value"
+                    ;;
+                *)
+                    echo -e "${YELLOW}$key:${NC} $value"
+                    ;;
+            esac
+        fi
+    done
+}
+
+# Interactive mode
+interactive_mode() {
+    while true; do
+        echo ""
+        echo -e "${BLUE}=== Bluetooth Scanner ===${NC}"
+        echo "1) Quick scan (10 seconds)"
+        echo "2) Medium scan (30 seconds)"
+        echo "3) Long scan (60 seconds)"
+        echo "4) Show paired devices"
+        echo "5) Get device details by MAC"
+        echo "6) Turn Bluetooth ON"
+        echo "7) Turn Bluetooth OFF"
+        echo "8) Exit"
+        echo -n "Choose [1-8]: "
+        read choice
+        
+        case $choice in
+            1) scan_for_devices 10 ;;
+            2) scan_for_devices 30 ;;
+            3) scan_for_devices 60 ;;
+            4) 
+                echo -e "\n${BLUE}=== Paired Devices ===${NC}\n"
+                bluetoothctl devices | while read line; do
+                    mac=$(echo "$line" | awk '{print $2}')
+                    name=$(echo "$line" | cut -d' ' -f3-)
+                    if bluetoothctl info "$mac" | grep -q "Paired: yes"; then
+                        echo -e "${GREEN}✓${NC} $name ($mac)"
+                    fi
+                done
+                ;;
+            5)
+                echo -n "Enter MAC address (e.g., AA:BB:CC:DD:EE:FF): "
+                read mac
+                get_device_details "$mac"
+                ;;
+            6)
+                echo -e "${GREEN}Turning Bluetooth ON...${NC}"
+                echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1
+                sleep 1
+                if bluetoothctl show | grep -q "Powered: yes"; then
+                    echo -e "${GREEN}Bluetooth is now ON${NC}"
+                else
+                    echo -e "${RED}Failed to turn ON Bluetooth${NC}"
+                fi
+                ;;
+            7)
+                echo -e "${YELLOW}Turning Bluetooth OFF...${NC}"
+                echo -e "power off\nquit" | bluetoothctl > /dev/null 2>&1
+                echo -e "${YELLOW}Bluetooth is now OFF${NC}"
+                ;;
+            8)
+                echo -e "${GREEN}Goodbye!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                ;;
+        esac
+    done
+}
+
+# Simple scan function
+simple_scan() {
+    local duration=${1:-10}
+    
+    # Check if Bluetooth is on
+    if ! bluetoothctl show | grep -q "Powered: yes"; then
+        echo -e "${YELLOW}Bluetooth is off. Turning it on...${NC}"
+        echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1
+        sleep 2
+    fi
+    
+    scan_for_devices "$duration"
 }
 
 # Main
 case "$1" in
-    --json)
-        duration=${2:-10}
-        scan_json "$duration"
+    -s|--scan)
+        simple_scan "$2"
+        ;;
+    -i|--interactive)
+        interactive_mode
+        ;;
+    -p|--paired)
+        echo -e "\n${BLUE}Paired Devices:${NC}\n"
+        bluetoothctl devices | while read line; do
+            mac=$(echo "$line" | awk '{print $2}')
+            name=$(echo "$line" | cut -d' ' -f3-)
+            if bluetoothctl info "$mac" 2>/dev/null | grep -q "Paired: yes"; then
+                echo "$name ($mac)"
+            fi
+        done
+        ;;
+    -h|--help)
+        echo "Usage: $0 [OPTIONS]"
+        echo "  -s, --scan [SECONDS]    Scan for devices"
+        echo "  -i, --interactive       Run interactive mode"
+        echo "  -p, --paired           Show paired devices"
+        echo "  -h, --help             Show this help"
+        echo ""
+        echo "Examples:"
+        echo "  $0 --scan 15           Scan for 15 seconds"
+        echo "  $0 --interactive       Start interactive menu"
         ;;
     *)
-        # Use the basic version for normal output
-        exec bash -c "$(cat <<'EOF'
-# ... include the basic script here ...
-EOF
-)"
+        simple_scan 10
         ;;
 esac
